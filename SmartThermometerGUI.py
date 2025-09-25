@@ -22,6 +22,7 @@ class SmartThermometerGUI:
         self.root.title("Smart Thermometer GUI")
         
         # Initialize data structures
+        #TODO: Replace with real data source
         self.temps_c = {1: 22.0, 2: 22.0} # Start at room temp (approx).
         self.sensors_enabled = {1: False, 2: False}
         self.third_box_on = True
@@ -123,6 +124,7 @@ class SmartThermometerGUI:
         # Schedule the next update
         self.root.after(UPDATE_INTERVAL_MS, self.update_gui)
     
+    #TODO: Replace with real data source
     def simulate_new_data(self):
         # This part simulates the data coming from the ESP32.
         # In a real system, you would read from serial/network here.
