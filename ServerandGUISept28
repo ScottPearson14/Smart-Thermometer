@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
-"""
-Merged Flask + Tkinter GUI for Smart Thermometer
-- Runs Flask server in a background thread.
-- Stores incoming temperature posts in a thread-safe queue.
-- Tkinter GUI reads latest queue item once per second and updates
-  the 300s rolling history and the live graph.
-  
-Usage:
-    python merged_therm_gui.py
-Ensure your ESP32 posts to http://<this_machine_ip>:8080/data
-"""
+""" Merged Flask + Tkinter GUI for Smart Thermometer - Runs Flask server in a background thread.
+   Stores incoming temperature posts in a thread-safe queue.
+   Tkinter GUI reads latest queue item once per second and updates the 300s rolling history and the live graph.
 
+
+   Ensure your ESP32 posts to http://<this_machine_ip>:8080/data
+"""
 from flask import Flask, request, jsonify
 from datetime import datetime
 import threading
@@ -22,49 +17,121 @@ import tkinter as tk
 from tkinter import ttk
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import json
+import os
+
+
+
 
 # --- Requirements and Constants ---
-GRAPH_TIME_SPAN = 300          # seconds to keep on graph
-UPDATE_INTERVAL_MS = 1000     # GUI update interval in ms (1s)
+GRAPH_TIME_SPAN = 300  # seconds to keep on graph
+UPDATE_INTERVAL_MS = 1000  # GUI update interval in ms (1s)
 TEMP_C_MAX = 50
 TEMP_C_MIN = 10
+TEMP_F_MIN = 50
+TEMP_F_MAX = 122
+PERSISTENCE_FILE = "temp_history.json"
+MAX_HISTORY_SEC = 500  # store last 500 seconds
+
+
 
 # Thread-safe queue to pass data from Flask -> GUI
 data_queue = queue.Queue()
 
+
 # For deciding if third box is on/off (no data means off)
 THIRD_BOX_TIMEOUT_S = 2.0  # if no posts within this, treat as off
+
+
+# -----------------------------
+# Shared command state (GUI -> ESP via Flask response)
+# -----------------------------
+# This holds the *desired* sensor states controlled by the computer UI.
+# Shared command state
+command_state = {
+    "sensor1": False,
+    "sensor2": False,
+    "display_on": True
+}
+
+# Track when each command was last changed
+last_changed = {
+    "sensor1": 0.0,
+    "sensor2": 0.0,
+    "display_on": 0.0
+}
+def save_history(history_1, history_2):
+    """Save history to disk as JSON."""
+    try:
+        with open(PERSISTENCE_FILE, "w") as f:
+            json.dump({
+                "history_1": list(history_1),
+                "history_2": list(history_2)
+            }, f)
+    except Exception as e:
+        print(f"Error saving history: {e}")
+
+
+def load_history():
+    """Load history from disk, return two lists (or None if no file)."""
+    if not os.path.exists(PERSISTENCE_FILE):
+        return None, None
+    try:
+        with open(PERSISTENCE_FILE, "r") as f:
+            data = json.load(f)
+            return data.get("history_1", []), data.get("history_2", [])
+    except Exception as e:
+        print(f"Error loading history: {e}")
+        return None, None
+
 
 # -----------------------------
 # Flask server (background)
 # -----------------------------
 app = Flask(__name__)
 
+
+
+
 @app.route('/')
 def home():
-    return "ESP32 Temperature Server is running!"
+   return "ESP32 Temperature Server is running!"
+
+
+
 
 @app.route('/test')
 def test_endpoint():
-    return jsonify({"message": "Server is running!", "timestamp": datetime.now().isoformat()})
+   return jsonify({"message": "Server is running!", "timestamp": datetime.now().isoformat()})
+
+
+
 
 @app.route('/data', methods=['POST'])
 def receive_data():
     try:
         data = request.json or {}
-        # The ESP32 sends temp1/temp2 as numbers or null.
         temp1 = data.get("temp1", None)
         temp2 = data.get("temp2", None)
         esp_ts = data.get("timestamp", None)
 
-        # stamp server receive time
+        # --- NEW: update command_state if ESP sent its local button states ---
+        if "sensor1" in data:
+            # Only accept ESP's update if it's "newer" than GUI
+            if time.time() - last_changed["sensor1"] > 1.0:  # 1s "cooldown"
+                command_state["sensor1"] = bool(data["sensor1"])
+
+        if "sensor2" in data:
+            if time.time() - last_changed["sensor2"] > 1.0:
+                command_state["sensor2"] = bool(data["sensor2"])
+
         received_time = time.time()
         human_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{human_ts}] Received data from ESP32: "
+              f"temp1={temp1}, temp2={temp2}, esp_ts={esp_ts}, "
+              f"sensor1={command_state['sensor1']}, sensor2={command_state['sensor2']}")
 
-        # Log to console
-        print(f"[{human_ts}] Received data from ESP32: temp1={temp1}, temp2={temp2}, esp_ts={esp_ts}")
-
-        # Push to queue (latest entry)
+        # Push to queue
         data_queue.put({
             "temp1": temp1,
             "temp2": temp2,
@@ -72,271 +139,364 @@ def receive_data():
             "server_recv_time": received_time
         })
 
-        return jsonify({"status": "success"}), 200
-
+        # Respond with current command_state
+        resp = {
+            "status": "success",
+            "sensor1": bool(command_state.get("sensor1", False)),
+            "sensor2": bool(command_state.get("sensor2", False)),
+            "display_on": bool(command_state.get("display_on", False))
+        }
+        return jsonify(resp), 200
     except Exception as e:
         print(f"Error processing request: {e}")
         return jsonify({"status": "error", "message": str(e)}), 400
 
 
+
+
 def run_flask_server():
-    # Important: disable the reloader when using Flask in a thread
-    app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False, threaded=True)
+   # Important: disable the reloader when using Flask in a thread
+   app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False, threaded=True)
+
+
 
 
 # -----------------------------
 # GUI + Plotting
 # -----------------------------
 class SmartThermometerGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Smart Thermometer GUI (Merged Server + GUI)")
+   def __init__(self, root):
+       self.root = root
+       self.root.title("Smart Thermometer GUI (Merged Server + GUI)")
 
-        # Current temps (last known)
-        self.temps_c = {1: 22.0, 2: 22.0}  # initial guess
-        # Sensors enabled (controlled by ESP posting null or value)
-        self.sensors_enabled = {1: False, 2: False}
-        # third_box_on derived from receive activity
-        self.third_box_on = False
-        self.last_recv_time = 0.0
 
-        # history deques (most recent value appended right)
-        nan_init = float('nan')
-        self.history_1 = collections.deque([nan_init] * GRAPH_TIME_SPAN, maxlen=GRAPH_TIME_SPAN)
-        self.history_2 = collections.deque([nan_init] * GRAPH_TIME_SPAN, maxlen=GRAPH_TIME_SPAN)
+       # Current temps (last known)
+       self.temps_c = {1: 22.0, 2: 22.0}  # initial guess
 
-        # GUI widgets
-        self.create_widgets()
-        self.setup_graph()
 
-        # Start periodic GUI update
-        self.root.after(UPDATE_INTERVAL_MS, self.periodic_update)
+       # Sensors enabled (controlled by ESP posting null or value)
+       self.sensors_enabled = {1: False, 2: False}
 
-    def create_widgets(self):
-        control_frame = ttk.LabelFrame(self.root, text="System Control & Real-Time Data")
-        control_frame.pack(padx=10, pady=10, fill="x")
 
-        self.third_box_switch_var = tk.BooleanVar(value=True)
-        # This checkbox simulates local "third box" on/off. It does not override real hardware:
-        # if hardware says off (no posts), GUI will show no data. This checkbutton is left as a stub.
-        self.third_box_switch = ttk.Checkbutton(control_frame, text="Third Box Sim (stub)", variable=self.third_box_switch_var, command=self.toggle_third_box)
-        self.third_box_switch.grid(row=0, column=0, padx=5, pady=5)
+       # third_box_on derived from receive activity
+       self.third_box_on = False
+       self.last_recv_time = 0.0
 
-        self.unit_button = ttk.Button(control_frame, text="Switch to °F", command=self.toggle_units)
-        self.unit_button.grid(row=0, column=1, padx=5, pady=5)
-        self.display_units = 'C'  # 'C' or 'F'
 
-        self.temp_label_1 = ttk.Label(control_frame, text="Sensor 1: ---", font=('Helvetica', 18, 'bold'))
-        self.temp_label_1.grid(row=1, column=0, padx=10, pady=6, sticky="W")
+       # history deques (most recent value appended right)
+       nan_init = float('nan')
 
-        self.temp_label_2 = ttk.Label(control_frame, text="Sensor 2: ---", font=('Helvetica', 18, 'bold'))
-        self.temp_label_2.grid(row=2, column=0, padx=10, pady=6, sticky="W")
+       loaded1, loaded2 = load_history()
+       if loaded1 and loaded2:
+            # Ensure lists are numeric/NaN and ordered oldest->newest
+            # Keep at most MAX_HISTORY_SEC and preserve that order
+            loaded1 = [v if (v is None or (isinstance(v, (int, float)) and not math.isnan(v))) else float('nan') for v in loaded1]
+            loaded2 = [v if (v is None or (isinstance(v, (int, float)) and not math.isnan(v))) else float('nan') for v in loaded2]
 
-        # Buttons left as stubs (per your request)
-        self.toggle_button_1 = ttk.Button(control_frame, text="Toggle Sensor 1 (stub)", command=lambda: self.toggle_sensor(1))
-        self.toggle_button_1.grid(row=1, column=1, padx=5, pady=5)
+            print(f"Loaded {len(loaded1)} points from persistent history")
+            # keep the most recent MAX_HISTORY_SEC entries (oldest->newest)
+            self.history_1 = collections.deque(loaded1[-MAX_HISTORY_SEC:], maxlen=MAX_HISTORY_SEC)
+            self.history_2 = collections.deque(loaded2[-MAX_HISTORY_SEC:], maxlen=MAX_HISTORY_SEC)
 
-        self.toggle_button_2 = ttk.Button(control_frame, text="Toggle Sensor 2 (stub)", command=lambda: self.toggle_sensor(2))
-        self.toggle_button_2.grid(row=2, column=1, padx=5, pady=5)
+            # If loaded histories are shorter than MAX_HISTORY_SEC, pad the left (oldest) side with NaNs
+            if len(self.history_1) < MAX_HISTORY_SEC:
+                pad = [float('nan')] * (MAX_HISTORY_SEC - len(self.history_1))
+                self.history_1 = collections.deque(pad + list(self.history_1), maxlen=MAX_HISTORY_SEC)
+            if len(self.history_2) < MAX_HISTORY_SEC:
+                pad = [float('nan')] * (MAX_HISTORY_SEC - len(self.history_2))
+                self.history_2 = collections.deque(pad + list(self.history_2), maxlen=MAX_HISTORY_SEC)
+       else:
+            self.history_1 = collections.deque([nan_init] * MAX_HISTORY_SEC, maxlen=MAX_HISTORY_SEC)
+            self.history_2 = collections.deque([nan_init] * MAX_HISTORY_SEC, maxlen=MAX_HISTORY_SEC)
 
-    def setup_graph(self):
-        graph_frame = ttk.LabelFrame(self.root, text="Temperature Graph (Last 300 Seconds)")
-        graph_frame.pack(padx=10, pady=10, fill="both", expand=True)
 
-        self.fig, self.ax = plt.subplots(figsize=(9, 4))
-        self.canvas = FigureCanvasTkAgg(self.fig, master=graph_frame)
-        self.canvas_widget = self.canvas.get_tk_widget()
-        self.canvas_widget.pack(fill=tk.BOTH, expand=True)
+       # GUI widgets
+       self.create_widgets()
+       self.setup_graph()
 
-        # initial axis settings
-        self.ax.set_ylim(TEMP_C_MIN, TEMP_C_MAX)
-        self.ax.set_xlim(GRAPH_TIME_SPAN, 0)
-        self.ax.set_ylabel("Temp, °C")
-        self.ax.set_xlabel("Seconds ago")
-        self.ax.set_title("Temperature History")
-        self.legend = None
 
-    # Called every second by Tkinter .after
-    def periodic_update(self):
-        """
-        1) Drain the queue for the latest message (if any).
-        2) Update sensors_enabled, temps, last_recv_time.
-        3) Append either new values (if received) or NaN to the history buffers.
-        4) Update labels and redraw graph.
-        """
-        got_message = False
-        latest_msg = None
-        # Drain the queue, keep the most recent message
-        while True:
-            try:
-                msg = data_queue.get_nowait()
-                latest_msg = msg
-                got_message = True
-            except queue.Empty:
-                break
+       # Start periodic GUI update
+       self.root.after(UPDATE_INTERVAL_MS, self.periodic_update)
 
-        if got_message and latest_msg is not None:
-            # Use latest message only (since updates are once/sec from ESP32)
-            t1 = latest_msg.get("temp1", None)
-            t2 = latest_msg.get("temp2", None)
-            self.last_recv_time = latest_msg.get("server_recv_time", time.time())
 
-            # If posted null -> sensor unplugged -> mark disabled; else enabled
-            if t1 is None:
-                self.sensors_enabled[1] = False
-            else:
-                # ensure it's a float
-                try:
-                    self.temps_c[1] = float(t1)
-                except Exception:
-                    # leave previous value if conversion fails
-                    pass
-                self.sensors_enabled[1] = True
+   def create_widgets(self):
+       control_frame = ttk.LabelFrame(self.root, text="System Control & Real-Time Data")
+       control_frame.pack(padx=10, pady=10, fill="x")
 
-            if t2 is None:
-                self.sensors_enabled[2] = False
-            else:
-                try:
-                    self.temps_c[2] = float(t2)
-                except Exception:
-                    pass
-                self.sensors_enabled[2] = True
 
-            # mark third box on (we have data)
-            self.third_box_on = True
+       self.unit_button = ttk.Button(control_frame, text="Switch to °F", command=self.toggle_units)
+       self.unit_button.grid(row=0, column=0, padx=5, pady=5)
+       self.display_units = 'C'  # 'C' or 'F'
 
-            # Append to history: if sensor enabled add reading, else NaN
-            self.history_1.append(self.temps_c[1] if self.sensors_enabled[1] else float('nan'))
-            self.history_2.append(self.temps_c[2] if self.sensors_enabled[2] else float('nan'))
 
+       self.temp_label_1 = ttk.Label(control_frame, text="Sensor 1: ---", font=('Helvetica', 18, 'bold'))
+       self.temp_label_1.grid(row=1, column=0, padx=10, pady=6, sticky="W")
+       self.temp_label_2 = ttk.Label(control_frame, text="Sensor 2: ---", font=('Helvetica', 18, 'bold'))
+       self.temp_label_2.grid(row=2, column=0, padx=10, pady=6, sticky="W")
+
+
+       # Now these toggle buttons *control the command_state* that is sent to the ESP.
+       self.toggle_button_1 = ttk.Button(control_frame, text=self._btn_text(1),
+                                         command=lambda: self.toggle_sensor_cmd(1))
+       self.toggle_button_1.grid(row=1, column=1, padx=5, pady=5)
+
+
+       self.toggle_button_2 = ttk.Button(control_frame, text=self._btn_text(2),
+                                         command=lambda: self.toggle_sensor_cmd(2))
+       self.toggle_button_2.grid(row=2, column=1, padx=5, pady=5)
+
+       # Phone number input (to the right of Toggle 1, row=1, col=2)
+       ttk.Label(control_frame, text="Phone:").grid(row=1, column=2, padx=5, pady=5, sticky="e")
+       self.phone_var = tk.StringVar()
+       self.phone_entry = ttk.Entry(control_frame, textvariable=self.phone_var, width=20)
+       self.phone_entry.grid(row=1, column=3, padx=5, pady=5, sticky="w")
+
+       # Email input (to the right of Toggle 2, row=2, col=2)
+       ttk.Label(control_frame, text="Email:").grid(row=2, column=2, padx=5, pady=5, sticky="e")
+       self.email_var = tk.StringVar()
+       self.email_entry = ttk.Entry(control_frame, textvariable=self.email_var, width=20)
+       self.email_entry.grid(row=2, column=3, padx=5, pady=5, sticky="w")
+
+
+   def _btn_text(self, sensor_num):
+       # show current desired state in the button text
+       desired = command_state.get(f"sensor{sensor_num}", False)
+       return f"Set Sensor {sensor_num} {'OFF' if desired else 'ON'}"
+
+
+   def toggle_sensor_cmd(self, sensor_num):
+        key = f"sensor{sensor_num}"
+        current = command_state.get(key, False)
+        command_state[key] = not current
+        last_changed[key] = time.time()   # NEW: mark GUI change
+        print(f"(Virtual) Sensor {sensor_num} desired set to {'ON' if command_state[key] else 'OFF'}")
+        if sensor_num == 1:
+            self.toggle_button_1.config(text=self._btn_text(1))
         else:
-            # No message this second
-            now = time.time()
-            # if last receive too old, consider third box off
-            if now - self.last_recv_time > THIRD_BOX_TIMEOUT_S:
-                self.third_box_on = False
-            # append missing (NaN) to both histories (graph must continue to scroll)
-            self.history_1.append(float('nan'))
-            self.history_2.append(float('nan'))
+            self.toggle_button_2.config(text=self._btn_text(2))
 
-        # Update textual labels based on state
-        if not self.third_box_on:
-            self.temp_label_1.config(text="No data available")
-            self.temp_label_2.config(text="No data available")
-        else:
-            # Sensor 1
-            if self.sensors_enabled[1]:
-                temp = self.temps_c[1]
-                if self.display_units == 'F':
-                    temp = self.c_to_f(temp)
-                self.temp_label_1.config(text=f"Sensor 1: {temp:.2f}°{self.display_units}")
-            else:
-                self.temp_label_1.config(text="Sensor 1: OFF")
-            # Sensor 2
-            if self.sensors_enabled[2]:
-                temp = self.temps_c[2]
-                if self.display_units == 'F':
-                    temp = self.c_to_f(temp)
-                self.temp_label_2.config(text=f"Sensor 2: {temp:.2f}°{self.display_units}")
-            else:
-                self.temp_label_2.config(text="Sensor 2: OFF")
 
-        # Redraw graph using current histories
-        self.redraw_graph()
+   def setup_graph(self):
+       graph_frame = ttk.LabelFrame(self.root, text="Temperature Graph (Last 300 Seconds)")
+       graph_frame.pack(padx=10, pady=10, fill="both", expand=True)
+       self.fig, self.ax = plt.subplots(figsize=(9, 4))
+       self.canvas = FigureCanvasTkAgg(self.fig, master=graph_frame)
+       self.canvas_widget = self.canvas.get_tk_widget()
+       self.canvas_widget.pack(fill=tk.BOTH, expand=True)
 
-        # schedule next update
-        self.root.after(UPDATE_INTERVAL_MS, self.periodic_update)
 
-    def redraw_graph(self):
-        # Prepare data
-        y1 = list(self.history_1)
-        y2 = list(self.history_2)
-        x = list(range(GRAPH_TIME_SPAN, 0, -1))  # seconds ago from 300 -> 1
+       # initial axis settings
+       self.ax.set_ylim(TEMP_C_MIN, TEMP_C_MAX)  # fixed Celsius bounds at startup
+       self.ax.set_xlim(GRAPH_TIME_SPAN, 0)
+       self.ax.set_ylabel("Temp, °C")
+       self.ax.set_xlabel("Seconds ago")
+       self.ax.set_title("Temperature History")
+       self.legend = None
 
-        # Convert to Fahrenheit if needed for plotting while preserving NaNs
-        if self.display_units == 'F':
-            y1 = [self.c_to_f(v) if (v is not None and not math.isnan(v)) else float('nan') for v in y1]
-            y2 = [self.c_to_f(v) if (v is not None and not math.isnan(v)) else float('nan') for v in y2]
+
+   # Called every second by Tkinter .after
+   def periodic_update(self):
+       """ 1) Drain the queue for the latest message (if any).
+           2) Update sensors_enabled, temps, last_recv_time.
+           3) Append either new values (if received) or NaN to the history buffers.
+           4) Update labels and redraw graph.
+       """
+       got_message = False
+       latest_msg = None
+       # Drain the queue, keep the most recent message
+       while True:
+           try:
+               msg = data_queue.get_nowait()
+               latest_msg = msg
+               got_message = True
+           except queue.Empty:
+               break
+
+
+       if got_message and latest_msg is not None:
+           # Use latest message only (since updates are once/sec from ESP32)
+           t1 = latest_msg.get("temp1", None)
+           t2 = latest_msg.get("temp2", None)
+           self.last_recv_time = latest_msg.get("server_recv_time", time.time())
+           # If posted null -> sensor unplugged -> mark disabled; else enabled
+           if t1 is None:
+               self.sensors_enabled[1] = False
+           else:
+               try:
+                   self.temps_c[1] = float(t1)
+               except Exception:
+                   pass
+               self.sensors_enabled[1] = True
+
+
+           if t2 is None:
+               self.sensors_enabled[2] = False
+           else:
+               try:
+                   self.temps_c[2] = float(t2)
+               except Exception:
+                   pass
+               self.sensors_enabled[2] = True
+
+
+           # mark third box on (we have data)
+           self.third_box_on = True
+
+
+           # Append to history: if sensor enabled add reading, else NaN
+           self.history_1.append(self.temps_c[1] if self.sensors_enabled[1] else float('nan'))
+           self.history_2.append(self.temps_c[2] if self.sensors_enabled[2] else float('nan'))
+       else:
+           # No message this second
+           now = time.time()
+           if now - self.last_recv_time > THIRD_BOX_TIMEOUT_S:
+               self.third_box_on = False
+           # append missing (NaN) to both histories (graph must continue to scroll)
+           self.history_1.append(float('nan'))
+           self.history_2.append(float('nan'))
+
+
+       # Update textual labels based on state
+       if not self.third_box_on:
+           self.temp_label_1.config(text="No data available")
+           self.temp_label_2.config(text="No data available")
+       else:
+           # Sensor 1
+           if self.sensors_enabled[1]:
+               temp = self.temps_c[1]
+               if self.display_units == 'F':
+                   temp = self.c_to_f(temp)
+               self.temp_label_1.config(text=f"Sensor 1: {temp:.2f}°{self.display_units}")
+           else:
+               self.temp_label_1.config(text="Sensor 1: OFF")
+
+
+           # Sensor 2
+           if self.sensors_enabled[2]:
+               temp = self.temps_c[2]
+               if self.display_units == 'F':
+                   temp = self.c_to_f(temp)
+               self.temp_label_2.config(text=f"Sensor 2: {temp:.2f}°{self.display_units}")
+           else:
+               self.temp_label_2.config(text="Sensor 2: OFF")
+
+
+       # Update GUI toggle button texts to reflect current desired command_state
+       self.toggle_button_1.config(text=self._btn_text(1))
+       self.toggle_button_2.config(text=self._btn_text(2))
+
+
+       # Redraw graph using current histories
+       self.redraw_graph()
+
+
+       # schedule next update
+       self.root.after(UPDATE_INTERVAL_MS, self.periodic_update)
+       # Persist histories to disk
+       save_history(self.history_1, self.history_2)
+
+
+   def redraw_graph(self):
+       y1_full = list(self.history_1)
+       y2_full = list(self.history_2)
+
+       if len(y1_full) < GRAPH_TIME_SPAN:
+           pad = [float('nan')] * (GRAPH_TIME_SPAN - len(y1_full))
+           y1 = pad + y1_full
+       else:
+           y1 = y1_full[-GRAPH_TIME_SPAN:]
+
+       if len(y2_full) < GRAPH_TIME_SPAN:
+           pad = [float('nan')] * (GRAPH_TIME_SPAN - len(y2_full))
+           y2 = pad + y2_full
+       else:
+           y2 = y2_full[-GRAPH_TIME_SPAN:]
+
+       x = list(range(GRAPH_TIME_SPAN, 0, -1))
+
+       # Convert to Fahrenheit if needed for plotting
+       if self.display_units == 'F':
+           y1 = [self.c_to_f(v) if (v is not None and not math.isnan(v)) else float('nan') for v in y1]
+           y2 = [self.c_to_f(v) if (v is not None and not math.isnan(v)) else float('nan') for v in y2]
+           self.ax.set_ylabel("Temp, °F")
+           self.ax.set_ylim(TEMP_F_MIN, TEMP_F_MAX)
+       else:
+           self.ax.set_ylabel("Temp, °C")
+           self.ax.set_ylim(TEMP_C_MIN, TEMP_C_MAX)
+
+       # Clear and redraw
+       self.ax.cla()
+       self.ax.set_xlim(GRAPH_TIME_SPAN, 0)
+       self.ax.set_xlabel("Seconds ago")
+       self.ax.set_title("Temperature History")
+        # Lock fixed y-axis ranges depending on units
+       if self.display_units == 'F':
             self.ax.set_ylabel("Temp, °F")
-            self.ax.set_ylim(self.c_to_f(TEMP_C_MIN), self.c_to_f(TEMP_C_MAX))
-        else:
+            self.ax.set_ylim(TEMP_F_MIN, TEMP_F_MAX)
+       else:
             self.ax.set_ylabel("Temp, °C")
             self.ax.set_ylim(TEMP_C_MIN, TEMP_C_MAX)
 
-        # Clear and redraw
-        self.ax.cla()
-        self.ax.set_xlim(GRAPH_TIME_SPAN, 0)
-        self.ax.set_xlabel("Seconds ago")
-        self.ax.set_title("Temperature History")
-        self.ax.set_ylabel(self.ax.get_ylabel())
+       # Fixed colors for sensors
+       sensor_colors = {1: "blue", 2: "red"}
 
-        # Plot continuous segments for each sensor so missing data shows as gaps
-        def plot_segments(x_vals, y_vals, label):
-            seg_x = []
-            seg_y = []
-            for xi, yi in zip(x_vals, y_vals):
-                missing = (yi is None) or (isinstance(yi, float) and math.isnan(yi))
-                if not missing:
-                    seg_x.append(xi)
-                    seg_y.append(yi)
-                else:
-                    if seg_x:
-                        self.ax.plot(seg_x, seg_y, linewidth=1.5, label=label if label else "")
-                        seg_x = []
-                        seg_y = []
-                        # After the first plotted segment, clear the label (so legend not repeated)
-                        label = ""
-            if seg_x:
-                self.ax.plot(seg_x, seg_y, linewidth=1.5, label=label)
-        
-        plot_segments(x, y1, "Sensor 1")
-        plot_segments(x, y2, "Sensor 2")
+       def plot_segments(x_vals, y_vals, label, color):
+           seg_x, seg_y = [], []
+           first_label = label
+           for xi, yi in zip(x_vals, y_vals):
+               missing = (yi is None) or (isinstance(yi, float) and math.isnan(yi))
+               if not missing:
+                   seg_x.append(xi)
+                   seg_y.append(yi)
+               else:
+                   if seg_x:
+                       self.ax.plot(seg_x, seg_y, linewidth=1.5, label=first_label, color=color)
+                       first_label = ""
+                   seg_x, seg_y = [], []
+           if seg_x:
+               self.ax.plot(seg_x, seg_y, linewidth=1.5, label=first_label, color=color)
 
-        # Legend only once
-        self.ax.legend(loc='upper right')
-        self.ax.grid(True)
-        # Draw on canvas
-        self.canvas.draw_idle()
+       plot_segments(x, y1, "Sensor 1", sensor_colors[1])
+       plot_segments(x, y2, "Sensor 2", sensor_colors[2])
 
-    def toggle_units(self):
-        if self.display_units == 'C':
-            self.display_units = 'F'
-            self.unit_button.config(text="Switch to °C")
-        else:
-            self.display_units = 'C'
-            self.unit_button.config(text="Switch to °F")
+       self.ax.legend(loc='upper right')
+       self.ax.grid(True)
+       self.canvas.draw_idle()
 
-    def toggle_third_box(self):
-        # This is a stub control. The real third_box_on depends on ESP posts.
-        v = self.third_box_switch_var.get()
-        print(f"(Stub) Third box sim set to {v}")
 
-    def toggle_sensor(self, sensor_num):
-        # Left as a stub to avoid interfering with real hardware button behavior.
-        self.sensors_enabled[sensor_num] = not self.sensors_enabled[sensor_num]
-        print(f"(Stub) Sensor {sensor_num} toggled to {'ON' if self.sensors_enabled[sensor_num] else 'OFF'}")
+   def toggle_units(self):
+       if self.display_units == 'C':
+           self.display_units = 'F'
+           self.unit_button.config(text="Switch to °C")
+       else:
+           self.display_units = 'C'
+           self.unit_button.config(text="Switch to °F")
 
-    @staticmethod
-    def c_to_f(celsius):
-        return (celsius * 9/5) + 32
+   def c_to_f(self, celsius):
+       return (celsius * 9 / 5) + 32
+
+
 
 
 # -----------------------------
 # Main startup
 # -----------------------------
 def main():
-    # Start Flask in background thread
-    flask_thread = threading.Thread(target=run_flask_server, daemon=True)
-    flask_thread.start()
-    print("Flask server thread started on port 8080.")
+   # Start Flask in background thread
+   flask_thread = threading.Thread(target=run_flask_server, daemon=True)
+   flask_thread.start()
+   print("Flask server thread started on port 8080.")
 
-    # Start Tkinter GUI on main thread
-    root = tk.Tk()
-    gui = SmartThermometerGUI(root)
-    print("Starting GUI mainloop...")
-    root.mainloop()
-    print("GUI closed. Exiting.")
+
+   # Start Tkinter GUI on main thread
+   root = tk.Tk()
+   gui = SmartThermometerGUI(root)
+   print("Starting GUI mainloop...")
+   root.mainloop()
+   print("GUI closed. Exiting.")
+
+
 
 
 if __name__ == "__main__":
-    main()
+   main()
