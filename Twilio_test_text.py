@@ -5,8 +5,9 @@ ACCOUNT_SID = "AC9b8a0e9eae4e3bc14a539ff7bd46b7c9"
 AUTH_TOKEN = "3914edbaeb967838c56309427136c630"
 
 # === Phone Numbers ===
-TO_NUMBER = "+17123103373"   # Destination phone number (your virtual number)
-FROM_NUMBER = "+18556127806" # Your Twilio number
+# ensure that these are the same so that they get sent to my virtual phone
+FROM_NUMBER = "+18556127806"   # Your Twilio trial number
+TO_NUMBER = "+18777804236"     # Virtual Phone number
 
 # === Twilio API URL ===
 BASE_URL = f"https://api.twilio.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json"
