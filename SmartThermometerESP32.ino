@@ -1,3 +1,19 @@
+// SmartThermometerESP32.ino
+//
+//   ESP32-based smart thermometer system with dual DS18B20 sensors, OLED 
+//   display, and WiFi connectivity. Local buttons allow toggling sensors, 
+//   while a hardware switch controls the display. Sensor data is read, 
+//   displayed, and periodically sent to a Flask server in JSON format. 
+//   The server can also send back remote state overrides.
+//
+// Dependencies:
+//   Adafruit GFX & SSD1306 libraries
+//   OneWire & DallasTemperature libraries
+//   ArduinoJson library
+//
+// Group 11: Braden Miller, Kent Zdan, Scott Pearson, Xavier Uhrmacher
+// Due: 10/03/2025
+
 #include <SPI.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -6,8 +22,7 @@
 #include <DallasTemperature.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <ArduinoJson.h> // << added
-
+#include <ArduinoJson.h>
 
 // =========================
 // OLED DISPLAY
@@ -18,14 +33,12 @@
 #define SCREEN_ADDRESS 0x3C
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-
 // =========================
 // BUTTONS & SWITCH
 // =========================
 #define BUTTON1_PIN 35
 #define BUTTON2_PIN 34
 #define SWITCH_PIN 13
-
 
 // =========================
 // TEMPERATURE SENSORS
@@ -37,7 +50,6 @@ OneWire oneWire2(TEMP_SENSOR2_PIN);
 DallasTemperature tempSensor1(&oneWire1);
 DallasTemperature tempSensor2(&oneWire2);
 
-
 // =========================
 // SENSOR STATES
 // =========================
@@ -47,7 +59,6 @@ bool display_on = false;
 bool sensor1_disconnected = false;
 bool sensor2_disconnected = false;
 
-
 // =========================
 // TEMPERATURE DATA
 // =========================
@@ -55,7 +66,6 @@ float temp1 = 0.0;
 float temp2 = 0.0;
 unsigned long lastTempRead = 0;
 const unsigned long tempReadInterval = 1000; // 1 sec
-
 
 // =========================
 // BUTTON DEBOUNCE
@@ -66,7 +76,6 @@ unsigned long last_button1_time = 0;
 unsigned long last_button2_time = 0;
 const unsigned long debounce_delay = 200;
 
-
 // =========================
 // WIFI CONFIG
 // =========================
@@ -74,25 +83,21 @@ const char* ssid = "Hotspot";       // <-- your SSID
 const char* password = "NajeebNajeeb"; // <-- your password
 const char* serverURL = "http://172.20.10.11:8080/data"; // <-- update to Flask IP
 
-
 // =========================
 // SETUP
 // =========================
 void setup() {
  Serial.begin(115200);
 
-
  // Button/switch setup
  pinMode(BUTTON1_PIN, INPUT);
  pinMode(BUTTON2_PIN, INPUT);
  pinMode(SWITCH_PIN, INPUT_PULLDOWN);
 
-
  // Init temp sensors
  tempSensor1.begin();
  tempSensor2.begin();
  Serial.println("Temperature sensors initialized");
-
 
  // Init display
  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
@@ -100,7 +105,6 @@ void setup() {
    for (;;) {}
  }
  updateDisplay();
-
 
  // Connect WiFi
  Serial.println("Connecting to WiFi...");
@@ -120,13 +124,11 @@ void setup() {
  }
 }
 
-
 // =========================
 // LOOP
 // =========================
 void loop() {
  unsigned long currentMillis = millis();
-
 
  // --- Check display switch immediately ---
  bool switch_current = digitalRead(SWITCH_PIN);
@@ -136,7 +138,6 @@ void loop() {
    Serial.print("Display switch: ");
    Serial.println(display_on ? "ON" : "OFF");
  }
-
 
  // --- Handle buttons quickly ---
  if (display_on) {
@@ -151,7 +152,6 @@ void loop() {
    }
    button1_last_state = button1_current;
 
-
    bool button2_current = digitalRead(BUTTON2_PIN);
    if (button2_current == HIGH && button2_last_state == LOW) {
      if (millis() - last_button2_time > debounce_delay) {
@@ -163,7 +163,6 @@ void loop() {
    }
    button2_last_state = button2_current;
  }
-
 
  // --- Read temps + send data only once per second ---
  if (currentMillis - lastTempRead >= tempReadInterval) {
@@ -177,7 +176,6 @@ void loop() {
 
  delay(5); // very small delay to avoid hogging CPU
 }
-
 
 // =========================
 // DISPLAY
@@ -227,7 +225,6 @@ void updateDisplay() {
 
   display.display();
 }
-
 
 // =========================
 // TEMPERATURE READ
@@ -292,7 +289,6 @@ void sendData() {
       jsonData += "\"temp2\": null,";
     }
 
-    // --- NEW: always send current sensor states so server stays in sync ---
     jsonData += "\"sensor1\": " + String(sensor1_enabled ? "true" : "false") + ",";
     jsonData += "\"sensor2\": " + String(sensor2_enabled ? "true" : "false") + ",";
 
